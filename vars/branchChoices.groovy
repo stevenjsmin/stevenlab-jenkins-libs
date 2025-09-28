@@ -18,7 +18,7 @@ def call(Map cfg = [:]) {
         raw = exec()
     } else {
         // 컨텍스트 없으면 임시로 node 잡아서 실행
-        node(cfg.get('label','')) {
+        node(cfg.get('master','')) {
             raw = exec()
         }
     }
