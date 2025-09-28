@@ -1,28 +1,25 @@
+// vars/branchChoices.groovy
+// repoUrl 예: https://github.com/owner/repo.git  (공개 저장소만)
+
+import groovy.json.JsonSlurperClassic
+
 def call(Map cfg = [:]) {
-    def repo = cfg.repoUrl
-    if (!repo) { error "[branchChoices] repoUrl is required" }
-
-    def exec = {
-        sh(returnStdout: true, script: """
-            set -euo pipefail
-            git ls-remote --heads "${repo}" \
-              | awk '{print \$2}' \
-              | sed 's|refs/heads/||' \
-              | sort -u
-        """).trim()
+    def repoUrl = cfg.repoUrl
+    if (!repoUrl) {
+        error "[branchChoices] repoUrl is required"
     }
 
-    def raw
-    if (env.WORKSPACE) {
-        // 이미 node/agent 컨텍스트 안
-        raw = exec()
-    } else {
-        // 컨텍스트 없으면 임시로 node 잡아서 실행
-        node(cfg.get('master','')) {
-            raw = exec()
-        }
+    // 여기서 슬래시와 콜론을 안전하게 처리
+    def m = (repoUrl =~ /github\.com[\/:](.+?)\/([^\/\.]+)(?:\.git)?$/)
+    if (!m) {
+        error "[branchChoices] Unsupported repoUrl: ${repoUrl}"
     }
+    def owner = m[0][1]
+    def repo  = m[0][2]
+    def api   = "https://api.github.com/repos/${owner}/${repo}/branches?per_page=100"
 
-    if (!raw?.trim()) return ['main']
-    return raw.split('\n') as List<String>
+    def txt = new URL(api).getText(requestProperties: ['User-Agent':'jenkins-branchChoices'])
+    def parsed = new JsonSlurperClassic().parseText(txt)
+    def names  = parsed.collect { it.name }
+    return names ?: ['main']
 }
