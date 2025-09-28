@@ -1,26 +1,69 @@
 // vars/branchChoices.groovy
-// 사용법: def branches = branchChoices(repoUrl: 'https://github.com/owner/repo.git')
-// - 공개 저장소만 지원 (자격증명 불필요)
-// - git 클라이언트가 에이전트에 설치되어 있어야 함
+// 공개 GitHub 저장소 전용. credentialsId 없이 동작.
+// repoUrl 예: https://github.com/owner/repo.git 또는 https://github.com/owner/repo
+
+import groovy.json.JsonSlurperClassic
 
 def call(Map cfg = [:]) {
-    def repo = cfg.repoUrl
-    if (!repo) {
+    def repoUrl = cfg.repoUrl
+    if (!repoUrl) {
         error "[branchChoices] repoUrl is required"
     }
 
-    // 네트워크/호환성 보장: shallow 없이 heads만 조회
-    def raw = sh(returnStdout: true, script: """
-        set -euo pipefail
-        git ls-remote --heads "${repo}" \
-          | awk '{print \$2}' \
-          | sed 's|refs/heads/||' \
-          | sort -u
-    """).trim()
-
-    if (!raw) {
-        echo "[branchChoices] No heads found in ${repo}. Fallback to ['main']"
-        return ['main']
+    // owner/repo 추출
+    def m = (repoUrl =~ /github\.com[/:]([^/]+)\/([^/.]+)(?:\.git)?$/)
+    if (!m) {
+        error "[branchChoices] Unsupported repoUrl: ${repoUrl}"
     }
-    return raw.split('\\n') as List<String>
+    def owner = m[0][1]
+    def repo  = m[0][2]
+    def api   = "https://api.github.com/repos/${owner}/${repo}/branches?per_page=100"
+
+            // 1) httpRequest 플러그인이 있으면 사용 (권장)
+    if (stepsAvailable('httpRequest')) {
+        def resp = httpRequest(
+                url: api,
+                httpMode: 'GET',
+                validResponseCodes: '200',
+                customHeaders: [[name: 'User-Agent', value: 'jenkins-branchChoices']]
+        )
+        return parseBranches(resp.getContent())
+    }
+
+    // 2) 플러그인 없으면 순수 Groovy URL로 fallback
+    def txt = fetchViaURL(api)
+    return parseBranches(txt)
+}
+
+// ---- helpers ----
+
+@NonCPS
+private List<String> parseBranches(String jsonText) {
+    if (!jsonText?.trim()) return ['main']
+    def parsed = new JsonSlurperClassic().parseText(jsonText)
+    def names = (parsed instanceof List) ? parsed.collect { it.name as String } : []
+    if (!names) return ['main']
+    return names.unique().sort()
+}
+
+@NonCPS
+private String fetchViaURL(String urlStr) {
+    def conn = new URL(urlStr).openConnection()
+    conn.setRequestProperty('User-Agent', 'jenkins-branchChoices')
+    conn.setConnectTimeout(10000)
+    conn.setReadTimeout(15000)
+    conn.doInput = true
+    return conn.inputStream.getText('UTF-8')
+}
+
+@NonCPS
+private boolean stepsAvailable(String stepName) {
+    try {
+        // 라이브러리에서 파이프라인 스텝 존재 여부 점검
+        def dsl = org.jenkinsci.plugins.workflow.cps.DSL.getThreadCurrentDSL()
+        dsl.invokeMethod(stepName, [[$class: 'org.jenkinsci.plugins.workflow.steps.EchoStep', message: 'probe']])
+        return true
+    } catch (Throwable ignore) {
+        return false
+    }
 }
